@@ -32,6 +32,11 @@ with st.sidebar:
     st.markdown(f"{'🟢' if api_ok else '🔴'} Google AI API")
     if not api_ok:
         st.warning("API 키가 없습니다.\nApp settings → Secrets에 추가하세요.")
+        # 디버그: secrets에 어떤 키가 보이는지 확인
+        try:
+            st.caption(f"secrets 키 목록: {list(st.secrets.keys())}")
+        except Exception as e:
+            st.caption(f"secrets 접근 오류: {e}")
 
 # ── 메인 입력 ────────────────────────────────────────────────────────────────
 topic = st.text_input(

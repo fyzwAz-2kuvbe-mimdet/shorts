@@ -19,7 +19,9 @@ def _get_secret(key: str) -> str:
 
 
 class Settings:
-    GOOGLE_AI_API_KEY: str = _get_secret("GOOGLE_AI_API_KEY")
+    @property
+    def GOOGLE_AI_API_KEY(self) -> str:
+        return _get_secret("GOOGLE_AI_API_KEY")
 
     # Streamlit Cloud는 프로젝트 디렉토리가 읽기 전용 → /tmp 사용
     _output_dir = Path(
