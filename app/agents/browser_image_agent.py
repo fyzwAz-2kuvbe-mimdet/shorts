@@ -103,7 +103,7 @@ class BrowserImageAgent(BrowserScenarioAgent):
                     time.sleep(3)
 
         finally:
-            self.driver.quit()
+            self.close_tab()
 
         return [p for p in saved_paths if p is not None]
 
@@ -120,7 +120,7 @@ class BrowserImageAgent(BrowserScenarioAgent):
             out_path = get_image_path(scene_number)
             return self._generate_one_image(prompt, out_path, style_ref_path=style_ref_path)
         finally:
-            self.driver.quit()
+            self.close_tab()
 
     # ── 단일 이미지 생성 ──────────────────────────────────────────────────────
     def _generate_one_image(

@@ -19,7 +19,6 @@ IS_CLOUD = (
 if not IS_CLOUD:
     from app.agents.browser_agent import BrowserScenarioAgent
     from app.agents.browser_image_agent import BrowserImageAgent
-    from app.utils.credentials import save_credentials, load_credentials, has_credentials, clear_credentials
 from app.agents.image_agent import ImageAgent
 from app.agents.tts_agent import TTSAgent
 from app.agents.video_agent import VideoAgent
@@ -103,41 +102,27 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Google 계정 설정 (로컬 전용) ─────────────────────────────────────────
+    # ── Chrome 연결 설정 (로컬 전용) ─────────────────────────────────────────
     if not IS_CLOUD:
-        st.markdown("**🔑 Google 계정**")
-        saved_email, _ = load_credentials()
-        cred_ok = has_credentials()
+        from app.utils.chrome_debug import is_debug_port_open, launch_chrome_with_debugging, DEBUG_PORT
 
-        if cred_ok:
-            st.success(f"저장됨: {saved_email}")
-            if st.button("계정 변경 / 삭제", use_container_width=True):
-                st.session_state["show_login_form"] = True
+        st.markdown("**🔌 Chrome 연결**")
+        port_ok = is_debug_port_open()
 
-        if not cred_ok or st.session_state.get("show_login_form", False):
-            with st.form("login_form"):
-                st.caption("입력한 정보는 Windows Credential Manager에만 저장됩니다.")
-                input_email = st.text_input("Google 이메일", placeholder="example@gmail.com")
-                input_pw = st.text_input("비밀번호", type="password")
-                col1, col2 = st.columns(2)
-                with col1:
-                    save_btn = st.form_submit_button("💾 저장", use_container_width=True)
-                with col2:
-                    del_btn = st.form_submit_button("🗑️ 삭제", use_container_width=True)
+        if port_ok:
+            st.success(f"✅ Chrome 연결됨 (포트 {DEBUG_PORT})")
+        else:
+            st.warning(f"⚠️ Chrome 미연결 (포트 {DEBUG_PORT})")
 
-                if save_btn:
-                    if input_email and input_pw:
-                        save_credentials(input_email, input_pw)
-                        st.session_state["show_login_form"] = False
-                        st.success("저장 완료!")
-                        st.rerun()
-                    else:
-                        st.warning("이메일과 비밀번호를 모두 입력해주세요.")
-                if del_btn:
-                    clear_credentials()
-                    st.session_state["show_login_form"] = False
-                    st.info("계정 정보가 삭제됐습니다.")
+        if st.button("🔌 Chrome 연결 준비", use_container_width=True,
+                     help="Chrome을 원격 제어 모드로 재시작합니다. 기존 로그인 세션이 유지됩니다."):
+            with st.spinner("Chrome 재시작 중... (기존 창이 닫힙니다)"):
+                try:
+                    launch_chrome_with_debugging()
+                    st.success("✅ Chrome 준비 완료! Gemini에 로그인 상태로 열렸습니다.")
                     st.rerun()
+                except Exception as e:
+                    st.error(f"Chrome 시작 오류: {e}")
 
     st.divider()
 
@@ -154,14 +139,11 @@ with st.sidebar:
         browser_mode = st.toggle(
             "🌐 브라우저 모드 (API 없이)",
             value=st.session_state.browser_mode,
-            help="Chrome을 열어 Gemini 웹에 직접 입력합니다. API 할당량 없음.",
+            help="열린 Chrome의 새 탭에서 Gemini를 사용합니다.",
         )
         st.session_state.browser_mode = browser_mode
-        if browser_mode:
-            if not has_credentials():
-                st.warning("⚠️ 위에서 Google 계정을 먼저 저장하세요.")
-            else:
-                st.info("Chrome이 열리면 자동으로 로그인됩니다.")
+        if browser_mode and not is_debug_port_open():
+            st.warning("⚠️ 위에서 'Chrome 연결 준비'를 먼저 실행하세요.")
 
     st.divider()
 
