@@ -104,25 +104,44 @@ with st.sidebar:
 
     # ── Chrome 연결 설정 (로컬 전용) ─────────────────────────────────────────
     if not IS_CLOUD:
-        from app.utils.chrome_debug import is_debug_port_open, launch_chrome_with_debugging, DEBUG_PORT
+        from app.utils.chrome_debug import (
+            is_debug_port_open, launch_chrome_with_debugging,
+            is_first_time, DEBUG_PORT
+        )
 
-        st.markdown("**🔌 Chrome 연결**")
+        st.markdown("**🔌 Gemini 전용 Chrome**")
         port_ok = is_debug_port_open()
 
         if port_ok:
-            st.success(f"✅ Chrome 연결됨 (포트 {DEBUG_PORT})")
+            st.success(f"✅ 연결됨 (포트 {DEBUG_PORT})")
         else:
-            st.warning(f"⚠️ Chrome 미연결 (포트 {DEBUG_PORT})")
+            st.warning("⚠️ 미연결")
+            if is_first_time():
+                st.info(
+                    "처음 실행 시:\n"
+                    "1. 아래 버튼으로 Chrome 열기\n"
+                    "2. 열린 창에서 Google 로그인\n"
+                    "3. 이후엔 자동 연결됩니다"
+                )
 
-        if st.button("🔌 Chrome 연결 준비", use_container_width=True,
-                     help="Chrome을 원격 제어 모드로 재시작합니다. 기존 로그인 세션이 유지됩니다."):
-            with st.spinner("Chrome 재시작 중... (기존 창이 닫힙니다)"):
+        if st.button(
+            "🚀 Gemini Chrome 열기" if not port_ok else "🔄 Gemini Chrome 재시작",
+            use_container_width=True,
+            help="기존 Chrome은 그대로 유지됩니다. 별도 창이 열립니다.",
+        ):
+            with st.spinner("Gemini 전용 Chrome 실행 중..."):
                 try:
                     launch_chrome_with_debugging()
-                    st.success("✅ Chrome 준비 완료! Gemini에 로그인 상태로 열렸습니다.")
+                    if is_first_time():
+                        st.warning(
+                            "⚠️ 열린 Chrome 창에서 **Google 로그인**을 완료하세요.\n"
+                            "로그인 후 다음 실행부터는 자동으로 연결됩니다."
+                        )
+                    else:
+                        st.success("✅ Gemini Chrome 준비 완료!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Chrome 시작 오류: {e}")
+                    st.error(f"Chrome 실행 오류: {e}")
 
     st.divider()
 
@@ -139,11 +158,11 @@ with st.sidebar:
         browser_mode = st.toggle(
             "🌐 브라우저 모드 (API 없이)",
             value=st.session_state.browser_mode,
-            help="열린 Chrome의 새 탭에서 Gemini를 사용합니다.",
+            help="Gemini 전용 Chrome의 새 탭에서 실행합니다.",
         )
         st.session_state.browser_mode = browser_mode
         if browser_mode and not is_debug_port_open():
-            st.warning("⚠️ 위에서 'Chrome 연결 준비'를 먼저 실행하세요.")
+            st.warning("⚠️ 위에서 'Gemini Chrome 열기'를 먼저 실행하세요.")
 
     st.divider()
 
