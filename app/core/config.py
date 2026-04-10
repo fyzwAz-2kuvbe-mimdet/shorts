@@ -8,14 +8,18 @@ load_dotenv()
 
 def _get_secret(key: str) -> str:
     """st.secrets (Streamlit Cloud / 로컬 secrets.toml) 우선, 없으면 환경변수"""
+    # 1순위: 환경변수 (Streamlit Cloud는 Secrets를 환경변수로도 주입함)
+    env_val = os.getenv(key, "")
+    if env_val:
+        return env_val
+    # 2순위: st.secrets 직접 접근
     try:
         import streamlit as st
-        val = st.secrets.get(key, "")
-        if val:
-            return str(val)
+        if key in st.secrets:
+            return str(st.secrets[key])
     except Exception:
         pass
-    return os.getenv(key, "")
+    return ""
 
 
 class Settings:
