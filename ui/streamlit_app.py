@@ -118,11 +118,11 @@ def show_quota_error(e: Exception):
     if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
         st.error(
             "**API 할당량 초과 (429)**\n\n"
-            "Google AI 무료 티어 한도에 도달했습니다.\n\n"
+            "모든 모델(2.5→2.0→1.5-flash) 재시도 후에도 실패했습니다.\n\n"
             "**해결 방법:**\n"
-            "1. [Google AI Studio](https://aistudio.google.com) → 결제 수단 등록\n"
-            "2. 잠시 후 다시 시도 (일일 한도 초기화: 매일 자정 PST)\n"
-            "3. [사용량 확인](https://ai.dev/rate-limit)"
+            "1. 잠시 후 다시 시도 (분당 한도 초기화)\n"
+            "2. 일일 한도 초기화: 매일 자정 PST (한국시간 오후 4시)\n"
+            "3. [Google AI Studio](https://aistudio.google.com) → 결제 수단 등록으로 한도 해제"
         )
     else:
         st.error(f"오류: {e}")

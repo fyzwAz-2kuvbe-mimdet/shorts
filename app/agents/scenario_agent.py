@@ -3,6 +3,7 @@ from google import genai
 from google.genai import types
 from app.core.config import settings
 from app.core.models import ShortsScript, SceneScript
+from app.utils.retry import call_with_model_fallback, GEMINI_TEXT_MODELS
 
 _SYSTEM_PROMPT = """당신은 SNS 숏폼 영상(YouTube Shorts / Reels / TikTok) 전문 시나리오 작가입니다.
 주어진 주제로 몰입감 있는 숏츠 대본을 작성하고, 반드시 아래 JSON 형식으로만 응답하세요.
@@ -27,8 +28,6 @@ _SYSTEM_PROMPT = """당신은 SNS 숏폼 영상(YouTube Shorts / Reels / TikTok)
 
 
 class ScenarioAgent:
-    MODEL = "gemini-2.5-flash"
-
     def __init__(self):
         self.client = genai.Client(api_key=settings.GOOGLE_AI_API_KEY)
 
@@ -46,21 +45,24 @@ class ScenarioAgent:
             "위 조건에 맞는 숏츠 시나리오를 JSON으로 작성해주세요."
         )
 
-        response = self.client.models.generate_content(
-            model=self.MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                temperature=0.9,
-            ),
-        )
+        def _call(model: str) -> ShortsScript:
+            response = self.client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    temperature=0.9,
+                ),
+            )
+            data = json.loads(response.text)
+            scenes = [SceneScript(**s) for s in data["scenes"]]
+            return ShortsScript(
+                title=data["title"],
+                topic=topic,
+                total_duration=float(data["total_duration"]),
+                scenes=scenes,
+            )
 
-        data = json.loads(response.text)
-        scenes = [SceneScript(**s) for s in data["scenes"]]
-        return ShortsScript(
-            title=data["title"],
-            topic=topic,
-            total_duration=float(data["total_duration"]),
-            scenes=scenes,
-        )
+        # gemini-2.5-flash → 2.0-flash → 1.5-flash 순으로 폴백
+        return call_with_model_fallback(_call, models=GEMINI_TEXT_MODELS)
