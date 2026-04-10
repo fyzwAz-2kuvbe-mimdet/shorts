@@ -110,10 +110,23 @@ class BrowserScenarioAgent:
     def ensure_logged_in(self) -> bool:
         """기존 Chrome의 새 탭에서 Gemini 접속 — 이미 로그인된 세션 사용"""
         self._status("🌐 새 탭에서 Gemini 접속 중...")
-        self.driver.execute_script("window.open('https://gemini.google.com/app');")
-        time.sleep(1)
+
+        # 새 탭 열기
+        self.driver.execute_script("window.open('');")
+        time.sleep(0.5)
         self.driver.switch_to.window(self.driver.window_handles[-1])
-        time.sleep(4)
+
+        # Gemini 이동
+        self.driver.get(GEMINI_URL)
+        self._status("⏳ Gemini 페이지 로딩 대기 중...")
+
+        # 1단계: 로그인 리다이렉트 여부 확인 (최대 10초)
+        try:
+            WebDriverWait(self.driver, 10).until(
+                lambda d: d.current_url != "about:blank"
+            )
+        except Exception:
+            pass
 
         if "accounts.google.com" in self.driver.current_url:
             raise RuntimeError(
@@ -121,7 +134,26 @@ class BrowserScenarioAgent:
                 "Chrome에서 gemini.google.com 에 로그인 후 다시 시도하세요."
             )
 
-        self._status("✅ Gemini 접속 완료 (로그인 유지)")
+        # 2단계: Gemini 입력창이 실제로 나타날 때까지 대기 (최대 20초)
+        self._status("⏳ Gemini 입력창 로딩 대기 중...")
+        input_ready = False
+        for sel in _INPUT_SELECTORS_CSS + ["//*[@contenteditable='true']"]:
+            try:
+                by = By.XPATH if sel.startswith("//") else By.CSS_SELECTOR
+                WebDriverWait(self.driver, 20).until(
+                    EC.presence_of_element_located((by, sel))
+                )
+                input_ready = True
+                break
+            except Exception:
+                continue
+
+        if not input_ready:
+            # 그래도 없으면 추가 5초 대기 후 진행
+            self._status("⚠️ 입력창 감지 실패 — 5초 추가 대기 후 진행")
+            time.sleep(5)
+
+        self._status("✅ Gemini 접속 완료")
         return True
 
     # ── Pro 모드 선택 ─────────────────────────────────────────────────────────
@@ -186,25 +218,47 @@ class BrowserScenarioAgent:
 
     # ── 입력창 탐색 ───────────────────────────────────────────────────────────
     def _find_input(self):
+        self._status("⌨️ 입력창 탐색 중...")
+
+        # CSS 셀렉터 시도 (타임아웃 15초)
         for sel in _INPUT_SELECTORS_CSS:
             try:
-                return WebDriverWait(self.driver, 8).until(
+                el = WebDriverWait(self.driver, 15).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
                 )
+                self._status(f"✅ 입력창 발견 (CSS: {sel[:40]})")
+                return el
             except Exception:
                 continue
+
+        # XPath 시도 (타임아웃 10초)
         for xpath in _INPUT_SELECTORS_XPATH:
             try:
-                return WebDriverWait(self.driver, 6).until(
+                el = WebDriverWait(self.driver, 10).until(
                     EC.element_to_be_clickable((By.XPATH, xpath))
                 )
+                self._status("✅ 입력창 발견 (XPath)")
+                return el
             except Exception:
                 continue
+
+        # 마지막 수단: 페이지 내 모든 contenteditable
         els = self.driver.find_elements(By.XPATH, "//*[@contenteditable='true']")
         if els:
+            self._status(f"✅ 입력창 발견 (contenteditable fallback, {len(els)}개 중 첫 번째)")
             return els[0]
+
+        # 디버그 정보 수집
+        page_title = self.driver.title
+        current_url = self.driver.current_url
+        all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+        all_textareas = self.driver.find_elements(By.TAG_NAME, "textarea")
         raise RuntimeError(
-            f"Gemini 입력창을 찾지 못했습니다.\n현재 URL: {self.driver.current_url}"
+            f"Gemini 입력창을 찾지 못했습니다.\n"
+            f"URL: {current_url}\n"
+            f"Title: {page_title}\n"
+            f"input 요소: {len(all_inputs)}개, textarea 요소: {len(all_textareas)}개\n"
+            "Chrome에서 Gemini 페이지가 완전히 로딩됐는지 확인하세요."
         )
 
     def _type_prompt(self, el, prompt: str):
