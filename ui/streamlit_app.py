@@ -18,6 +18,7 @@ IS_CLOUD = (
 
 if not IS_CLOUD:
     from app.agents.browser_agent import BrowserScenarioAgent
+    from app.agents.browser_image_agent import BrowserImageAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.tts_agent import TTSAgent
 from app.agents.video_agent import VideoAgent
@@ -304,61 +305,123 @@ with tab2:
     else:
         script = st.session_state.script
 
-        if st.button("🎨 전체 이미지 생성", key="run_images", type="primary"):
-            ensure_output_dirs()
-            agent = ImageAgent()
-            paths = []
-            prog = st.progress(0)
-            for i, scene in enumerate(script.scenes):
-                with st.spinner(f"장면 {scene.scene_number} 그리는 중..."):
-                    try:
-                        p = agent.generate_image(scene.image_prompt, scene.scene_number)
-                        paths.append(str(p))
-                    except Exception as e:
-                        show_quota_error(e)
-                        break
-                prog.progress((i + 1) / len(script.scenes))
-            if paths:
-                st.session_state.image_paths = paths
-                st.session_state.video_path = None
-                st.success(f"{len(paths)}개 이미지 생성 완료!")
+        # 이미지 생성 모드 선택
+        if IS_CLOUD:
+            img_mode = "api"
+            st.caption("☁️ Cloud 환경 — API 모드 (현재 Imagen API 오류 상태)")
+        else:
+            img_mode = st.radio(
+                "이미지 생성 방법",
+                ["🌐 브라우저 (Gemini 웹)", "⚙️ API (Imagen)"],
+                horizontal=True,
+                key="img_mode_radio",
+            )
+            img_mode = "browser" if "브라우저" in img_mode else "api"
 
-        # 이미지 그리드 표시 + 개별 재생성
+        st.divider()
+
+        # ── 전체 생성 버튼 ───────────────────────────────────────────────
+        btn_label = "🌐 브라우저로 전체 이미지 생성" if img_mode == "browser" else "🎨 전체 이미지 생성 (API)"
+        if st.button(btn_label, key="run_images", type="primary"):
+            ensure_output_dirs()
+            status_area = st.empty()
+            prog = st.progress(0)
+
+            if img_mode == "browser":
+                status_area.info("🌐 Chrome 실행 중...")
+                try:
+                    def _img_status(msg):
+                        status_area.info(msg)
+
+                    agent = BrowserImageAgent(status_fn=_img_status)
+                    prompts = [s.image_prompt for s in script.scenes]
+                    scene_nums = [s.scene_number for s in script.scenes]
+                    result_paths = agent.generate_all_images(prompts, scene_nums, _img_status)
+
+                    st.session_state.image_paths = [str(p) for p in result_paths]
+                    st.session_state.video_path = None
+
+                    ok = len(result_paths)
+                    total = len(script.scenes)
+                    if ok == total:
+                        status_area.success(f"✅ 전체 {ok}개 이미지 저장 완료!")
+                    else:
+                        status_area.warning(f"⚠️ {total}개 중 {ok}개 저장됨 (일부 실패)")
+
+                except Exception as e:
+                    status_area.error(f"브라우저 오류: {e}")
+
+            else:
+                # API 모드 (오류 시 장면별 표시, 나머지 계속 진행)
+                paths = []
+                errors = []
+                try:
+                    agent = ImageAgent()
+                    for i, scene in enumerate(script.scenes):
+                        status_area.info(f"🎨 장면 {scene.scene_number} 생성 중... ({i+1}/{len(script.scenes)})")
+                        try:
+                            p = agent.generate_image(scene.image_prompt, scene.scene_number)
+                            paths.append(str(p))
+                        except Exception as e:
+                            errors.append(f"장면 {scene.scene_number}: {e}")
+                            paths.append(None)
+                        prog.progress((i + 1) / len(script.scenes))
+                except Exception as e:
+                    status_area.error(f"이미지 에이전트 초기화 오류: {e}")
+
+                valid = [p for p in paths if p]
+                st.session_state.image_paths = valid
+                st.session_state.video_path = None
+
+                if valid:
+                    status_area.success(f"✅ {len(valid)}/{len(script.scenes)}개 완료")
+                if errors:
+                    with st.expander(f"⚠️ {len(errors)}개 장면 오류 (클릭해서 확인)"):
+                        for err in errors:
+                            st.error(err)
+                        st.info("💡 Imagen API 오류가 계속되면 **브라우저 모드**로 전환하세요.")
+
+        # ── 이미지 그리드 + 개별 재생성 ──────────────────────────────────
         if st.session_state.image_paths:
             st.divider()
-            n = len(script.scenes)
-            cols = st.columns(min(n, 3))
+            st.markdown(f"**생성된 이미지 ({len(st.session_state.image_paths)}개)**")
+            cols = st.columns(min(len(script.scenes), 3))
             for i, scene in enumerate(script.scenes):
                 with cols[i % 3]:
                     if i < len(st.session_state.image_paths):
-                        st.image(
-                            st.session_state.image_paths[i],
-                            caption=f"장면 {scene.scene_number}",
-                            use_container_width=True,
-                        )
-                    # 개별 재생성
+                        img_path = st.session_state.image_paths[i]
+                        if img_path and Path(img_path).exists():
+                            st.image(img_path, caption=f"장면 {scene.scene_number}", use_container_width=True)
+                        else:
+                            st.warning(f"장면 {scene.scene_number} 이미지 없음")
+
                     custom_prompt = st.text_input(
-                        "프롬프트 수정",
+                        "프롬프트 수정 후 재생성",
                         value=scene.image_prompt,
                         key=f"reprompt_{i}",
                         label_visibility="collapsed",
                     )
-                    if st.button("🔄 재생성", key=f"regen_img_{i}"):
+                    regen_mode = "browser" if (not IS_CLOUD and img_mode == "browser") else "api"
+                    if st.button(f"🔄 재생성", key=f"regen_img_{i}"):
                         ensure_output_dirs()
-                        with st.spinner("재생성 중..."):
+                        with st.spinner(f"장면 {scene.scene_number} 재생성 중..."):
                             try:
-                                agent = ImageAgent()
-                                p = agent.generate_image(custom_prompt, scene.scene_number)
-                                paths = list(st.session_state.image_paths)
-                                if i < len(paths):
-                                    paths[i] = str(p)
+                                if regen_mode == "browser":
+                                    agent = BrowserImageAgent()
+                                    p = agent.generate_one(custom_prompt, scene.scene_number)
                                 else:
-                                    paths.append(str(p))
-                                st.session_state.image_paths = paths
+                                    agent = ImageAgent()
+                                    p = agent.generate_image(custom_prompt, scene.scene_number)
+                                cur = list(st.session_state.image_paths)
+                                if i < len(cur):
+                                    cur[i] = str(p)
+                                else:
+                                    cur.append(str(p))
+                                st.session_state.image_paths = cur
                                 st.session_state.video_path = None
                                 st.rerun()
                             except Exception as e:
-                                show_quota_error(e)
+                                st.error(f"재생성 오류: {e}")
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — 성우 아리 (TTS)
