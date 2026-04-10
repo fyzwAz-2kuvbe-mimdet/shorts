@@ -27,8 +27,7 @@ _SYSTEM_PROMPT = """당신은 SNS 숏폼 영상(YouTube Shorts / Reels / TikTok)
 
 
 class ScenarioAgent:
-    # gemini-1.5-flash: 무료 티어 제공 / 2.0-flash 할당 초과 시 대안
-    MODEL = "gemini-1.5-flash"
+    MODEL = "gemini-2.5-flash"
 
     def __init__(self):
         self.client = genai.Client(api_key=settings.GOOGLE_AI_API_KEY)
