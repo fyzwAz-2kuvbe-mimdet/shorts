@@ -3,11 +3,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import os
 import streamlit as st
 from app.core.config import settings
 from app.core.models import ShortsScript, SceneScript
 from app.agents.scenario_agent import ScenarioAgent
-from app.agents.browser_agent import BrowserScenarioAgent
+
+# 브라우저 모드는 로컬 전용 — Streamlit Cloud 감지
+IS_CLOUD = (
+    os.getenv("HOME", "") == "/home/appuser"          # Streamlit Cloud
+    or os.path.exists("/mount/src")                    # Streamlit Cloud 마운트 경로
+    or os.getenv("STREAMLIT_SHARING_MODE") == "true"  # 공식 env
+)
+
+if not IS_CLOUD:
+    from app.agents.browser_agent import BrowserScenarioAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.tts_agent import TTSAgent
 from app.agents.video_agent import VideoAgent
@@ -92,32 +102,45 @@ with st.sidebar:
 
     # 시나리오 생성 모드 선택
     st.markdown("**시나리오 생성 모드**")
-    browser_mode = st.toggle(
-        "🌐 브라우저 모드 (API 없이)",
-        value=st.session_state.browser_mode,
-        help="Chrome을 열어 Gemini 웹에 직접 입력합니다. API 할당량 없음.",
-    )
-    st.session_state.browser_mode = browser_mode
 
-    if browser_mode:
-        st.info("Chrome이 자동으로 열립니다.\n**로컬 실행 전용**")
-        if st.button("🔑 Chrome 로그인 설정", use_container_width=True,
-                     help="처음 사용 시 Google 로그인 창이 열립니다."):
-            with st.spinner("Chrome 열기..."):
-                try:
-                    agent = BrowserScenarioAgent(status_fn=lambda m: None)
-                    logged = agent.is_logged_in()
-                    if logged:
-                        agent.close()
-                        st.success("✅ 이미 로그인되어 있습니다!")
-                    else:
-                        st.warning(
-                            "Google 로그인이 필요합니다.\n"
-                            "열린 Chrome 창에서 로그인 후 창을 닫으세요.\n"
-                            "다음 실행부터 자동으로 로그인됩니다."
-                        )
-                except Exception as e:
-                    st.error(f"Chrome 실행 오류: {e}")
+    if IS_CLOUD:
+        # Cloud에서는 브라우저 모드 비활성
+        st.toggle(
+            "🌐 브라우저 모드 (API 없이)",
+            value=False,
+            disabled=True,
+            help="브라우저 모드는 로컬 PC 실행 전용입니다.",
+        )
+        st.caption("☁️ Cloud 환경 — API 모드만 사용 가능")
+        browser_mode = False
+        st.session_state.browser_mode = False
+    else:
+        browser_mode = st.toggle(
+            "🌐 브라우저 모드 (API 없이)",
+            value=st.session_state.browser_mode,
+            help="Chrome을 열어 Gemini 웹에 직접 입력합니다. API 할당량 없음.",
+        )
+        st.session_state.browser_mode = browser_mode
+
+        if browser_mode:
+            st.info("Chrome이 자동으로 열립니다.\n**로컬 실행 전용**")
+            if st.button("🔑 Chrome 로그인 설정", use_container_width=True,
+                         help="처음 사용 시 Google 로그인 창이 열립니다."):
+                with st.spinner("Chrome 열기..."):
+                    try:
+                        agent = BrowserScenarioAgent(status_fn=lambda m: None)
+                        logged = agent.is_logged_in()
+                        if logged:
+                            agent.close()
+                            st.success("✅ 이미 로그인되어 있습니다!")
+                        else:
+                            st.warning(
+                                "Google 로그인이 필요합니다.\n"
+                                "열린 Chrome 창에서 로그인 후 창을 닫으세요.\n"
+                                "다음 실행부터 자동으로 로그인됩니다."
+                            )
+                    except Exception as e:
+                        st.error(f"Chrome 실행 오류: {e}")
 
     st.divider()
 
