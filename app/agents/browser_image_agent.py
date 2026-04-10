@@ -57,16 +57,9 @@ class BrowserImageAgent(BrowserScenarioAgent):
         saved_paths: list[Path] = []
 
         try:
-            # 1. Gemini 페이지 이동 (한 번만)
-            _status("🌐 Gemini 페이지 열기...")
-            self.driver.get(GEMINI_URL)
-            time.sleep(5)
-
-            if "accounts.google.com" in self.driver.current_url:
-                raise RuntimeError(
-                    "Google 로그인이 필요합니다.\n"
-                    "사이드바 '🔑 Chrome 로그인 설정'을 먼저 실행하세요."
-                )
+            # 1. Gemini 접속 + 자동 로그인
+            self._status = _status
+            self.ensure_logged_in()
 
             for idx, (prompt, scene_num) in enumerate(zip(prompts, scene_numbers)):
                 _status(f"🎨 장면 {scene_num} 이미지 생성 중... ({idx+1}/{len(prompts)})")
@@ -94,10 +87,7 @@ class BrowserImageAgent(BrowserScenarioAgent):
     def generate_one(self, prompt: str, scene_number: int) -> Path:
         """단일 이미지 생성 (개별 재생성용)"""
         try:
-            self.driver.get(GEMINI_URL)
-            time.sleep(5)
-            if "accounts.google.com" in self.driver.current_url:
-                raise RuntimeError("Google 로그인이 필요합니다.")
+            self.ensure_logged_in()
             out_path = get_image_path(scene_number)
             return self._generate_one_image(prompt, out_path, scene_number)
         finally:

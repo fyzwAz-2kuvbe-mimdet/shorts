@@ -19,6 +19,7 @@ IS_CLOUD = (
 if not IS_CLOUD:
     from app.agents.browser_agent import BrowserScenarioAgent
     from app.agents.browser_image_agent import BrowserImageAgent
+    from app.utils.credentials import save_credentials, load_credentials, has_credentials, clear_credentials
 from app.agents.image_agent import ImageAgent
 from app.agents.tts_agent import TTSAgent
 from app.agents.video_agent import VideoAgent
@@ -101,17 +102,50 @@ with st.sidebar:
 
     st.divider()
 
-    # 시나리오 생성 모드 선택
+    # ── Google 계정 설정 (로컬 전용) ─────────────────────────────────────────
+    if not IS_CLOUD:
+        st.markdown("**🔑 Google 계정**")
+        saved_email, _ = load_credentials()
+        cred_ok = has_credentials()
+
+        if cred_ok:
+            st.success(f"저장됨: {saved_email}")
+            if st.button("계정 변경 / 삭제", use_container_width=True):
+                st.session_state["show_login_form"] = True
+
+        if not cred_ok or st.session_state.get("show_login_form", False):
+            with st.form("login_form"):
+                st.caption("입력한 정보는 Windows Credential Manager에만 저장됩니다.")
+                input_email = st.text_input("Google 이메일", placeholder="example@gmail.com")
+                input_pw = st.text_input("비밀번호", type="password")
+                col1, col2 = st.columns(2)
+                with col1:
+                    save_btn = st.form_submit_button("💾 저장", use_container_width=True)
+                with col2:
+                    del_btn = st.form_submit_button("🗑️ 삭제", use_container_width=True)
+
+                if save_btn:
+                    if input_email and input_pw:
+                        save_credentials(input_email, input_pw)
+                        st.session_state["show_login_form"] = False
+                        st.success("저장 완료!")
+                        st.rerun()
+                    else:
+                        st.warning("이메일과 비밀번호를 모두 입력해주세요.")
+                if del_btn:
+                    clear_credentials()
+                    st.session_state["show_login_form"] = False
+                    st.info("계정 정보가 삭제됐습니다.")
+                    st.rerun()
+
+    st.divider()
+
+    # ── 시나리오 생성 모드 선택 ───────────────────────────────────────────────
     st.markdown("**시나리오 생성 모드**")
 
     if IS_CLOUD:
-        # Cloud에서는 브라우저 모드 비활성
-        st.toggle(
-            "🌐 브라우저 모드 (API 없이)",
-            value=False,
-            disabled=True,
-            help="브라우저 모드는 로컬 PC 실행 전용입니다.",
-        )
+        st.toggle("🌐 브라우저 모드 (API 없이)", value=False, disabled=True,
+                  help="브라우저 모드는 로컬 PC 실행 전용입니다.")
         st.caption("☁️ Cloud 환경 — API 모드만 사용 가능")
         browser_mode = False
         st.session_state.browser_mode = False
@@ -122,26 +156,11 @@ with st.sidebar:
             help="Chrome을 열어 Gemini 웹에 직접 입력합니다. API 할당량 없음.",
         )
         st.session_state.browser_mode = browser_mode
-
         if browser_mode:
-            st.info("Chrome이 자동으로 열립니다.\n**로컬 실행 전용**")
-            if st.button("🔑 Chrome 로그인 설정", use_container_width=True,
-                         help="처음 사용 시 Google 로그인 창이 열립니다."):
-                with st.spinner("Chrome 열기..."):
-                    try:
-                        agent = BrowserScenarioAgent(status_fn=lambda m: None)
-                        logged = agent.is_logged_in()
-                        if logged:
-                            agent.close()
-                            st.success("✅ 이미 로그인되어 있습니다!")
-                        else:
-                            st.warning(
-                                "Google 로그인이 필요합니다.\n"
-                                "열린 Chrome 창에서 로그인 후 창을 닫으세요.\n"
-                                "다음 실행부터 자동으로 로그인됩니다."
-                            )
-                    except Exception as e:
-                        st.error(f"Chrome 실행 오류: {e}")
+            if not has_credentials():
+                st.warning("⚠️ 위에서 Google 계정을 먼저 저장하세요.")
+            else:
+                st.info("Chrome이 열리면 자동으로 로그인됩니다.")
 
     st.divider()
 

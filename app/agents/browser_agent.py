@@ -1,10 +1,11 @@
 """
 Selenium으로 Gemini 웹 UI를 자동화하여 시나리오 생성.
-API 키 없이 로그인된 Chrome 브라우저를 통해 동작합니다.
+저장된 Google 계정으로 자동 로그인합니다.
 """
 import json
 import re
 import time
+import random
 import pyperclip
 from pathlib import Path
 
@@ -20,10 +21,12 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 
 from app.core.models import ShortsScript, SceneScript
+from app.utils.credentials import load_credentials
 
 GEMINI_URL = "https://gemini.google.com/app"
+GOOGLE_LOGIN_URL = "https://accounts.google.com/signin"
 
-# 이 앱 전용 Chrome 프로필 (로그인 정보 저장)
+# 이 앱 전용 Chrome 프로필 (로그인 세션 저장)
 CHROME_PROFILE_DIR = str(Path.home() / ".ai_shorts_chrome")
 
 _PROMPT_TEMPLATE = """\
@@ -50,7 +53,6 @@ JSON 외의 설명이나 텍스트는 절대 포함하지 마세요.
   ]
 }}"""
 
-# ── 셀렉터: 여러 Gemini 버전 대응 ────────────────────────────────────────────
 _INPUT_SELECTORS_CSS = [
     "div.ql-editor[contenteditable='true']",
     ".ql-editor[contenteditable='true']",
@@ -62,7 +64,6 @@ _INPUT_SELECTORS_XPATH = [
     "//rich-textarea//div[@contenteditable='true']",
     "//div[@contenteditable='true']",
 ]
-
 _RESPONSE_SELECTORS = [
     "model-response .markdown.markdown-main-panel",
     "model-response .markdown",
@@ -72,9 +73,14 @@ _RESPONSE_SELECTORS = [
 ]
 
 
-class BrowserScenarioAgent:
-    """Selenium + Gemini 웹 UI 기반 시나리오 생성 에이전트"""
+def _human_type(el, text: str, delay: float = 0.07):
+    """자동화 감지 우회를 위해 사람처럼 한 글자씩 입력"""
+    for ch in text:
+        el.send_keys(ch)
+        time.sleep(delay + random.uniform(0, 0.05))
 
+
+class BrowserScenarioAgent:
     def __init__(self, headless: bool = False, status_fn=None):
         self._status = status_fn or (lambda msg: None)
         self.driver = self._make_driver(headless)
@@ -90,32 +96,141 @@ class BrowserScenarioAgent:
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
         opts.add_argument("--start-maximized")
+        # 자동화 감지 추가 우회
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--disable-default-apps")
         if headless:
             opts.add_argument("--headless=new")
 
         service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=opts)
+        driver = webdriver.Chrome(service=service, options=opts)
 
-    # ── 공개 메서드 ───────────────────────────────────────────────────────────
+        # navigator.webdriver 속성 제거
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"},
+        )
+        return driver
+
+    # ── 로그인 ───────────────────────────────────────────────────────────────
+    def ensure_logged_in(self) -> bool:
+        """
+        Gemini 접속 → 로그인 여부 확인 → 필요 시 저장된 계정으로 자동 로그인.
+        반환값: 로그인 성공 여부
+        """
+        self._status("🌐 Gemini 접속 중...")
+        self.driver.get(GEMINI_URL)
+        time.sleep(4)
+
+        if "accounts.google.com" not in self.driver.current_url:
+            self._status("✅ 이미 로그인되어 있습니다.")
+            return True
+
+        # 로그인 필요 → 저장된 자격증명 사용
+        email, password = load_credentials()
+        if not email or not password:
+            raise RuntimeError(
+                "로그인이 필요하지만 저장된 계정 정보가 없습니다.\n"
+                "사이드바에서 Google 계정 이메일과 비밀번호를 입력 후 저장하세요."
+            )
+
+        self._status("🔑 Google 계정으로 자동 로그인 중...")
+        return self._do_login(email, password)
+
+    def _do_login(self, email: str, password: str) -> bool:
+        driver = self.driver
+
+        # ── 이메일 입력 ───────────────────────────────────────────────────
+        try:
+            email_el = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='email']"))
+            )
+        except TimeoutException:
+            raise RuntimeError("Google 로그인 이메일 입력창을 찾지 못했습니다.")
+
+        email_el.click()
+        time.sleep(0.3)
+        _human_type(email_el, email)
+        time.sleep(0.5)
+
+        # Next 클릭
+        self._click_next(driver)
+        time.sleep(2)
+
+        # ── 비밀번호 입력 ─────────────────────────────────────────────────
+        try:
+            pw_el = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='password']"))
+            )
+        except TimeoutException:
+            raise RuntimeError(
+                "비밀번호 입력창을 찾지 못했습니다.\n"
+                "2단계 인증(2FA)이 설정된 경우 Chrome 창에서 직접 완료해주세요."
+            )
+
+        pw_el.click()
+        time.sleep(0.3)
+        _human_type(pw_el, password)
+        time.sleep(0.5)
+
+        # Next 클릭
+        self._click_next(driver)
+
+        # ── 로그인 완료 대기 (최대 30초 — 2FA 등 대기) ───────────────────
+        self._status("⏳ 로그인 완료 대기 중... (2FA가 있다면 Chrome에서 완료해주세요)")
+        try:
+            WebDriverWait(driver, 30).until(
+                lambda d: "accounts.google.com" not in d.current_url
+            )
+        except TimeoutException:
+            raise RuntimeError(
+                "로그인 시간 초과.\n"
+                "2FA가 설정된 경우 Chrome 창에서 인증을 완료해주세요.\n"
+                "완료 후 다시 시도하면 세션이 유지됩니다."
+            )
+
+        # ── Gemini로 리다이렉트 ───────────────────────────────────────────
+        if "gemini.google.com" not in driver.current_url:
+            driver.get(GEMINI_URL)
+            time.sleep(4)
+
+        self._status("✅ 로그인 성공!")
+        return True
+
+    def _click_next(self, driver):
+        """Next / 다음 버튼 클릭"""
+        next_selectors = [
+            "button[jsname='LgbsSe']",   # 구글 로그인 Next
+            "div[jsname='Njthtb']",
+            "#identifierNext",
+            "#passwordNext",
+            "button:has(span)",
+        ]
+        for sel in next_selectors:
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, sel)
+                btn.click()
+                return
+            except Exception:
+                continue
+        # fallback: Enter
+        ActionChains(driver).send_keys(Keys.RETURN).perform()
+
+    # ── is_logged_in (로그인 설정 버튼용) ────────────────────────────────────
     def is_logged_in(self) -> bool:
         self.driver.get(GEMINI_URL)
         time.sleep(4)
         return "accounts.google.com" not in self.driver.current_url
 
-    def generate_script(
-        self,
-        topic: str,
-        num_scenes: int = 5,
-        style: str = "교육적",
-    ) -> ShortsScript:
+    # ── 시나리오 생성 ─────────────────────────────────────────────────────────
+    def generate_script(self, topic: str, num_scenes: int = 5, style: str = "교육적") -> ShortsScript:
         prompt = _PROMPT_TEMPLATE.format(
-            topic=topic,
-            num_scenes=num_scenes,
-            style=style,
-            min_dur=num_scenes * 5,
-            max_dur=num_scenes * 7,
+            topic=topic, num_scenes=num_scenes, style=style,
+            min_dur=num_scenes * 5, max_dur=num_scenes * 7,
         )
         try:
+            self.ensure_logged_in()
             raw = self._send_prompt(prompt)
             self._status("📄 응답 파싱 중...")
             return self._parse(raw, topic)
@@ -128,65 +243,46 @@ class BrowserScenarioAgent:
         except Exception:
             pass
 
-    # ── 내부: 입력창 탐색 ─────────────────────────────────────────────────────
-    def _find_input(self) -> webdriver.remote.webelement.WebElement:
-        # CSS 셀렉터 시도
+    # ── 입력창 탐색 ───────────────────────────────────────────────────────────
+    def _find_input(self):
         for sel in _INPUT_SELECTORS_CSS:
             try:
-                el = WebDriverWait(self.driver, 6).until(
+                return WebDriverWait(self.driver, 8).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
                 )
-                return el
             except Exception:
                 continue
-
-        # XPath 시도
         for xpath in _INPUT_SELECTORS_XPATH:
             try:
-                el = WebDriverWait(self.driver, 6).until(
+                return WebDriverWait(self.driver, 6).until(
                     EC.element_to_be_clickable((By.XPATH, xpath))
                 )
-                return el
             except Exception:
                 continue
-
-        # 최후: 페이지의 모든 contenteditable 중 첫 번째
         els = self.driver.find_elements(By.XPATH, "//*[@contenteditable='true']")
         if els:
             return els[0]
-
         raise RuntimeError(
-            "Gemini 입력창을 찾지 못했습니다.\n"
-            f"현재 URL: {self.driver.current_url}\n"
-            "Chrome에서 Gemini가 정상적으로 열려 있는지 확인하세요."
+            f"Gemini 입력창을 찾지 못했습니다.\n현재 URL: {self.driver.current_url}"
         )
 
-    # ── 내부: 텍스트 입력 (클립보드 붙여넣기) ────────────────────────────────
+    # ── 클립보드로 텍스트 입력 ────────────────────────────────────────────────
     def _type_prompt(self, el, prompt: str):
-        """pyperclip → Ctrl+V 방식: contenteditable React 컴포넌트에 안정적"""
         pyperclip.copy(prompt)
         el.click()
         time.sleep(0.3)
-
-        # 기존 내용 전체 선택 후 붙여넣기
-        ActionChains(self.driver) \
-            .key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL) \
-            .perform()
+        ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).perform()
         time.sleep(0.2)
-        ActionChains(self.driver) \
-            .key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL) \
-            .perform()
+        ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL).perform()
         time.sleep(0.5)
 
-    # ── 내부: 전송 버튼 클릭 또는 Enter ──────────────────────────────────────
+    # ── 전송 버튼 ────────────────────────────────────────────────────────────
     def _submit(self, input_el):
-        # 전송 버튼 우선
         send_selectors = [
             "button[aria-label='Send message']",
             "button[aria-label='메시지 보내기']",
             "button[aria-label='Submit']",
             "button.send-button",
-            "button[data-test-id='send-button']",
         ]
         for sel in send_selectors:
             try:
@@ -196,25 +292,18 @@ class BrowserScenarioAgent:
                     return
             except NoSuchElementException:
                 continue
-
-        # fallback: Shift+Enter 대신 Enter
         input_el.send_keys(Keys.RETURN)
 
-    # ── 내부: 생성 완료 대기 ─────────────────────────────────────────────────
+    # ── 응답 완료 대기 ────────────────────────────────────────────────────────
     def _wait_for_response(self):
-        """Stop 버튼 소멸 또는 응답 텍스트 안정화로 완료 감지"""
         stop_selectors = [
             "button[aria-label='Stop generating']",
             "button[aria-label='생성 중지']",
             "button[aria-label='Stop']",
-            "button[aria-label='Cancel']",
-            "[data-test-id='stop-button']",
         ]
+        self._status("⏳ Gemini 응답 생성 중...")
+        time.sleep(4)
 
-        self._status("⏳ Gemini 응답 생성 중... (30~60초 소요)")
-        time.sleep(4)  # 생성 시작 여유
-
-        # Stop 버튼이 나타날 때까지 대기
         stop_el = None
         for sel in stop_selectors:
             try:
@@ -226,24 +315,22 @@ class BrowserScenarioAgent:
                 continue
 
         if stop_el:
-            # Stop 버튼이 사라질 때까지 대기 (최대 2분)
             try:
                 WebDriverWait(self.driver, 120).until(EC.staleness_of(stop_el))
             except Exception:
                 pass
         else:
-            # Stop 버튼 못 찾으면 응답 텍스트 안정화 대기
-            prev_text = ""
+            prev = ""
             for _ in range(30):
                 time.sleep(3)
                 curr = self._extract_latest_response()
-                if curr and curr == prev_text:
+                if curr and curr == prev:
                     break
-                prev_text = curr
+                prev = curr
 
         time.sleep(2)
 
-    # ── 내부: 최신 응답 추출 ─────────────────────────────────────────────────
+    # ── 응답 텍스트 추출 ──────────────────────────────────────────────────────
     def _extract_latest_response(self) -> str:
         for sel in _RESPONSE_SELECTORS:
             els = self.driver.find_elements(By.CSS_SELECTOR, sel)
@@ -251,72 +338,41 @@ class BrowserScenarioAgent:
                 text = els[-1].text.strip()
                 if text:
                     return text
-
-        # 코드 블록 직접 추출
         for sel in ["pre code", "pre", "code"]:
             els = self.driver.find_elements(By.CSS_SELECTOR, sel)
             if els:
                 text = els[-1].text.strip()
                 if text:
                     return text
-
         return ""
 
-    # ── 내부: 전체 프롬프트 전송 흐름 ────────────────────────────────────────
+    # ── 전체 전송 흐름 ────────────────────────────────────────────────────────
     def _send_prompt(self, prompt: str) -> str:
-        # 1. Gemini 페이지 이동
-        self._status("🌐 Gemini 페이지 열기...")
-        self.driver.get(GEMINI_URL)
-        time.sleep(5)
-
-        # 2. 로그인 확인
-        if "accounts.google.com" in self.driver.current_url:
-            raise RuntimeError(
-                "Google 로그인이 필요합니다.\n"
-                "사이드바 '🔑 Chrome 로그인 설정'을 먼저 실행하세요."
-            )
-
-        # 3. 입력창 탐색
         self._status("⌨️ 입력창 탐색 중...")
         input_el = self._find_input()
 
-        # 4. 텍스트 입력 (클립보드)
         self._status("📋 프롬프트 입력 중...")
         self._type_prompt(input_el, prompt)
-
-        # 5. 전송
         self._submit(input_el)
-
-        # 6. 완료 대기
         self._wait_for_response()
 
-        # 7. 응답 추출
         self._status("📥 응답 추출 중...")
         text = self._extract_latest_response()
         if not text:
-            raise RuntimeError(
-                "Gemini 응답을 추출하지 못했습니다.\n"
-                "Chrome 창에서 응답이 생성됐는지 직접 확인해주세요."
-            )
+            raise RuntimeError("Gemini 응답을 추출하지 못했습니다.")
         return text
 
-    # ── 내부: JSON 파싱 ───────────────────────────────────────────────────────
+    # ── JSON 파싱 ─────────────────────────────────────────────────────────────
     @staticmethod
     def _parse(text: str, topic: str) -> ShortsScript:
-        # ```json ... ``` 블록 우선
         match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if not match:
             match = re.search(r"(\{[\s\S]*\})", text)
         if not match:
-            raise ValueError(
-                f"응답에서 JSON을 찾을 수 없습니다.\n원문:\n{text[:500]}"
-            )
-
+            raise ValueError(f"응답에서 JSON을 찾을 수 없습니다.\n{text[:500]}")
         data = json.loads(match.group(1))
         scenes = [SceneScript(**s) for s in data["scenes"]]
         return ShortsScript(
-            title=data["title"],
-            topic=topic,
-            total_duration=float(data["total_duration"]),
-            scenes=scenes,
+            title=data["title"], topic=topic,
+            total_duration=float(data["total_duration"]), scenes=scenes,
         )
