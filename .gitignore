@@ -1,0 +1,32 @@
+# Secrets (NEVER commit)
+.env
+*.env
+.streamlit/secrets.toml
+
+# Generated media output
+output/
+
+# Google Cloud credentials
+*service_account*.json
+credentials*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+build/
+dist/
+*.egg-info/
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

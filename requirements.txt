@@ -1,0 +1,19 @@
+# Google AI (Gemini scenario + Imagen 3)
+google-genai>=1.0.0
+
+# TTS (temporary: gTTS, no API key needed)
+gTTS>=2.5.0
+
+# Google Cloud TTS (switch when ready)
+# google-cloud-texttospeech>=2.16.0
+
+# Video synthesis
+moviepy==1.0.3
+
+# UI
+streamlit>=1.40.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+Pillow>=10.0.0
