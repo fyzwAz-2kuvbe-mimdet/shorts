@@ -4,114 +4,442 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
-from app.pipeline import ShortsPipeline
 from app.core.config import settings
+from app.core.models import ShortsScript, SceneScript
+from app.agents.scenario_agent import ScenarioAgent
+from app.agents.image_agent import ImageAgent
+from app.agents.tts_agent import TTSAgent
+from app.agents.video_agent import VideoAgent
+from app.core.models import GeneratedAssets
+from app.utils.file_utils import ensure_output_dirs
 
+# ── 페이지 설정 ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Shorts 자동화 에이전트",
+    page_title="AI Shorts 에이전트",
     page_icon="🎬",
     layout="wide",
 )
 
+# ── 에이전트 페르소나 정의 ────────────────────────────────────────────────────
+PERSONAS = {
+    "scenario": {
+        "emoji": "✍️",
+        "name": "극작가 제이",
+        "role": "시나리오 작가",
+        "desc": "주제를 받아 장면별 대사와 이미지 프롬프트를 작성합니다.",
+        "color": "#FF6B6B",
+        "bg": "#fff0f0",
+    },
+    "image": {
+        "emoji": "🎨",
+        "name": "화가 루나",
+        "role": "이미지 생성",
+        "desc": "각 장면을 9:16 세로형 이미지로 그립니다.",
+        "color": "#845EC2",
+        "bg": "#f5f0ff",
+    },
+    "tts": {
+        "emoji": "🎤",
+        "name": "성우 아리",
+        "role": "나레이터",
+        "desc": "대사를 자연스러운 음성으로 변환합니다.",
+        "color": "#0081CF",
+        "bg": "#f0f6ff",
+    },
+    "video": {
+        "emoji": "🎬",
+        "name": "편집장 맥스",
+        "role": "영상 편집",
+        "desc": "이미지와 음성을 합쳐 최종 영상을 완성합니다.",
+        "color": "#00897B",
+        "bg": "#f0faf8",
+    },
+}
+
+# ── 세션 상태 초기화 ──────────────────────────────────────────────────────────
+def init_state():
+    defaults = {
+        "script": None,
+        "image_paths": [],
+        "audio_paths": [],
+        "video_path": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
+
+# ── 헤더 ─────────────────────────────────────────────────────────────────────
 st.title("🎬 AI Shorts 자동화 에이전트")
-st.caption("Gemini Imagen · Google TTS · FFmpeg 으로 숏츠를 자동 생성합니다.")
+st.caption("각 에이전트를 개별 실행하거나 전체를 한번에 생성할 수 있습니다.")
 
 # ── 사이드바 ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ 생성 설정")
+    st.header("⚙️ 기본 설정")
 
-    num_scenes = st.slider("장면 수", min_value=3, max_value=10, value=5, step=1)
-
-    style = st.selectbox(
-        "영상 스타일",
-        ["교육적", "엔터테인먼트", "뉴스/정보", "감성적", "유머러스"],
+    topic = st.text_input(
+        "영상 주제",
+        placeholder="예: 블랙홀의 신비 / 커피가 뇌에 미치는 영향",
+        key="topic_input",
     )
+    num_scenes = st.slider("장면 수", 3, 10, 5)
+    style = st.selectbox("스타일", ["교육적", "엔터테인먼트", "뉴스/정보", "감성적", "유머러스"])
 
     st.divider()
+
+    # 전체 실행 버튼
+    run_all = st.button("🚀 전체 자동 생성", type="primary", use_container_width=True)
+
+    st.divider()
+
+    # API 상태
     api_ok = bool(settings.GOOGLE_AI_API_KEY)
     st.markdown(f"{'🟢' if api_ok else '🔴'} Google AI API")
     if not api_ok:
-        st.warning("API 키가 없습니다.")
-        with st.expander("🔍 디버그 정보"):
-            import os
-            st.text(f"환경변수 존재: {bool(os.getenv('GOOGLE_AI_API_KEY'))}")
-            try:
-                keys = list(st.secrets.keys())
-                st.text(f"secrets 키 목록: {keys}")
-                st.text(f"GOOGLE_AI_API_KEY in secrets: {'GOOGLE_AI_API_KEY' in st.secrets}")
-            except Exception as e:
-                st.text(f"secrets 접근 오류: {type(e).__name__}: {e}")
+        st.error("API 키 없음\nApp settings → Secrets")
 
-# ── 메인 입력 ────────────────────────────────────────────────────────────────
-topic = st.text_input(
-    "영상 주제",
-    placeholder="예: 블랙홀의 신비 / 커피가 뇌에 미치는 영향 / 파이썬을 배워야 하는 이유",
-    help="구체적일수록 더 좋은 시나리오가 생성됩니다.",
+    # 진행 상태 요약
+    st.divider()
+    st.markdown("**진행 상태**")
+    st.markdown(f"{'✅' if st.session_state.script else '⬜'} 시나리오")
+    st.markdown(f"{'✅' if st.session_state.image_paths else '⬜'} 이미지")
+    st.markdown(f"{'✅' if st.session_state.audio_paths else '⬜'} 음성")
+    st.markdown(f"{'✅' if st.session_state.video_path else '⬜'} 영상")
+
+    if st.button("🗑️ 초기화", use_container_width=True):
+        for k in ["script", "image_paths", "audio_paths", "video_path"]:
+            st.session_state[k] = None if k != "image_paths" and k != "audio_paths" else []
+        st.rerun()
+
+# ── 에러 표시 헬퍼 ───────────────────────────────────────────────────────────
+def show_quota_error(e: Exception):
+    msg = str(e)
+    if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+        st.error(
+            "**API 할당량 초과 (429)**\n\n"
+            "Google AI 무료 티어 한도에 도달했습니다.\n\n"
+            "**해결 방법:**\n"
+            "1. [Google AI Studio](https://aistudio.google.com) → 결제 수단 등록\n"
+            "2. 잠시 후 다시 시도 (일일 한도 초기화: 매일 자정 PST)\n"
+            "3. [사용량 확인](https://ai.dev/rate-limit)"
+        )
+    else:
+        st.error(f"오류: {e}")
+
+# ── 페르소나 카드 렌더링 ──────────────────────────────────────────────────────
+def persona_header(key: str):
+    p = PERSONAS[key]
+    st.markdown(
+        f"""<div style="background:{p['bg']};border-left:4px solid {p['color']};
+        padding:12px 16px;border-radius:8px;margin-bottom:12px">
+        <span style="font-size:2rem">{p['emoji']}</span>
+        <strong style="font-size:1.1rem;color:{p['color']}"> {p['name']}</strong>
+        <span style="color:#666"> · {p['role']}</span><br>
+        <span style="color:#888;font-size:0.9rem">{p['desc']}</span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+# ── 탭 레이아웃 ───────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["✍️ 극작가 제이", "🎨 화가 루나", "🎤 성우 아리", "🎬 편집장 맥스"]
 )
 
-generate_btn = st.button("🚀 영상 생성 시작", type="primary", use_container_width=True)
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 1 — 극작가 제이 (시나리오)
+# ════════════════════════════════════════════════════════════════════════════
+with tab1:
+    persona_header("scenario")
 
-# ── 파이프라인 실행 ───────────────────────────────────────────────────────────
-if generate_btn:
-    if not topic.strip():
-        st.warning("주제를 입력해주세요.")
-        st.stop()
+    if st.button("✍️ 시나리오 생성", key="run_scenario", type="primary"):
+        if not topic.strip():
+            st.warning("사이드바에서 영상 주제를 입력해주세요.")
+        else:
+            ensure_output_dirs()
+            with st.spinner("극작가 제이가 대본을 쓰고 있습니다..."):
+                try:
+                    agent = ScenarioAgent()
+                    st.session_state.script = agent.generate_script(topic, num_scenes, style)
+                    st.session_state.image_paths = []
+                    st.session_state.audio_paths = []
+                    st.session_state.video_path = None
+                    st.success("시나리오 완성!")
+                except Exception as e:
+                    show_quota_error(e)
 
-    try:
-        settings.validate()
-    except EnvironmentError as e:
-        st.error(str(e))
-        st.stop()
+    # 시나리오 표시 & 편집
+    if st.session_state.script:
+        script: ShortsScript = st.session_state.script
+        st.markdown(f"### 📋 {script.title}")
+        st.caption(f"총 길이: {script.total_duration:.0f}초 · {len(script.scenes)}장면")
+        st.divider()
 
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+        edited_scenes = []
+        for i, scene in enumerate(script.scenes):
+            with st.expander(f"장면 {scene.scene_number}", expanded=True):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    narration = st.text_area(
+                        "💬 나레이션",
+                        value=scene.narration,
+                        key=f"narration_{i}",
+                        height=100,
+                    )
+                with col_b:
+                    img_prompt = st.text_area(
+                        "🖼️ 이미지 프롬프트",
+                        value=scene.image_prompt,
+                        key=f"img_prompt_{i}",
+                        height=100,
+                    )
+                edited_scenes.append(
+                    SceneScript(
+                        scene_number=scene.scene_number,
+                        narration=narration,
+                        image_prompt=img_prompt,
+                        duration=scene.duration,
+                    )
+                )
 
-    def on_progress(msg: str, pct: int) -> None:
-        status_text.info(msg)
-        progress_bar.progress(pct)
+        if st.button("💾 수정 내용 저장", key="save_script"):
+            st.session_state.script = ShortsScript(
+                title=script.title,
+                topic=script.topic,
+                total_duration=script.total_duration,
+                scenes=edited_scenes,
+            )
+            st.session_state.image_paths = []
+            st.session_state.audio_paths = []
+            st.session_state.video_path = None
+            st.success("저장됨! 이미지·음성·영상은 다시 생성해주세요.")
+    else:
+        st.info("주제를 입력하고 '시나리오 생성' 버튼을 눌러주세요.")
 
-    try:
-        pipeline = ShortsPipeline()
-        assets = pipeline.run(
-            topic=topic.strip(),
-            num_scenes=num_scenes,
-            style=style,
-            on_progress=on_progress,
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — 화가 루나 (이미지)
+# ════════════════════════════════════════════════════════════════════════════
+with tab2:
+    persona_header("image")
+
+    if not st.session_state.script:
+        st.info("먼저 **극작가 제이**에서 시나리오를 생성해주세요.")
+    else:
+        script = st.session_state.script
+
+        if st.button("🎨 전체 이미지 생성", key="run_images", type="primary"):
+            ensure_output_dirs()
+            agent = ImageAgent()
+            paths = []
+            prog = st.progress(0)
+            for i, scene in enumerate(script.scenes):
+                with st.spinner(f"장면 {scene.scene_number} 그리는 중..."):
+                    try:
+                        p = agent.generate_image(scene.image_prompt, scene.scene_number)
+                        paths.append(str(p))
+                    except Exception as e:
+                        show_quota_error(e)
+                        break
+                prog.progress((i + 1) / len(script.scenes))
+            if paths:
+                st.session_state.image_paths = paths
+                st.session_state.video_path = None
+                st.success(f"{len(paths)}개 이미지 생성 완료!")
+
+        # 이미지 그리드 표시 + 개별 재생성
+        if st.session_state.image_paths:
+            st.divider()
+            n = len(script.scenes)
+            cols = st.columns(min(n, 3))
+            for i, scene in enumerate(script.scenes):
+                with cols[i % 3]:
+                    if i < len(st.session_state.image_paths):
+                        st.image(
+                            st.session_state.image_paths[i],
+                            caption=f"장면 {scene.scene_number}",
+                            use_container_width=True,
+                        )
+                    # 개별 재생성
+                    custom_prompt = st.text_input(
+                        "프롬프트 수정",
+                        value=scene.image_prompt,
+                        key=f"reprompt_{i}",
+                        label_visibility="collapsed",
+                    )
+                    if st.button("🔄 재생성", key=f"regen_img_{i}"):
+                        ensure_output_dirs()
+                        with st.spinner("재생성 중..."):
+                            try:
+                                agent = ImageAgent()
+                                p = agent.generate_image(custom_prompt, scene.scene_number)
+                                paths = list(st.session_state.image_paths)
+                                if i < len(paths):
+                                    paths[i] = str(p)
+                                else:
+                                    paths.append(str(p))
+                                st.session_state.image_paths = paths
+                                st.session_state.video_path = None
+                                st.rerun()
+                            except Exception as e:
+                                show_quota_error(e)
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3 — 성우 아리 (TTS)
+# ════════════════════════════════════════════════════════════════════════════
+with tab3:
+    persona_header("tts")
+
+    if not st.session_state.script:
+        st.info("먼저 **극작가 제이**에서 시나리오를 생성해주세요.")
+    else:
+        script = st.session_state.script
+
+        if st.button("🎤 전체 음성 생성", key="run_tts", type="primary"):
+            ensure_output_dirs()
+            agent = TTSAgent()
+            paths = []
+            prog = st.progress(0)
+            for i, scene in enumerate(script.scenes):
+                with st.spinner(f"장면 {scene.scene_number} 녹음 중..."):
+                    try:
+                        p = agent.synthesize(scene.narration, scene.scene_number)
+                        paths.append(str(p))
+                    except Exception as e:
+                        st.error(f"TTS 오류: {e}")
+                        break
+                prog.progress((i + 1) / len(script.scenes))
+            if paths:
+                st.session_state.audio_paths = paths
+                st.session_state.video_path = None
+                st.success(f"{len(paths)}개 음성 생성 완료!")
+
+        # 음성 플레이어 + 개별 재녹음
+        if st.session_state.audio_paths:
+            st.divider()
+            for i, scene in enumerate(script.scenes):
+                with st.expander(f"장면 {scene.scene_number} — {scene.narration[:30]}...", expanded=False):
+                    if i < len(st.session_state.audio_paths):
+                        st.audio(st.session_state.audio_paths[i])
+
+                    edit_text = st.text_area(
+                        "나레이션 수정",
+                        value=scene.narration,
+                        key=f"tts_edit_{i}",
+                        height=80,
+                    )
+                    if st.button("🔄 이 장면 재녹음", key=f"regen_tts_{i}"):
+                        ensure_output_dirs()
+                        with st.spinner("재녹음 중..."):
+                            try:
+                                agent = TTSAgent()
+                                p = agent.synthesize(edit_text, scene.scene_number)
+                                paths = list(st.session_state.audio_paths)
+                                if i < len(paths):
+                                    paths[i] = str(p)
+                                else:
+                                    paths.append(str(p))
+                                st.session_state.audio_paths = paths
+                                st.session_state.video_path = None
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"TTS 오류: {e}")
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 4 — 편집장 맥스 (영상)
+# ════════════════════════════════════════════════════════════════════════════
+with tab4:
+    persona_header("video")
+
+    has_images = bool(st.session_state.image_paths)
+    has_audio = bool(st.session_state.audio_paths)
+
+    if not st.session_state.script:
+        st.info("시나리오가 없습니다. 극작가 제이부터 시작하세요.")
+    elif not has_images:
+        st.warning("이미지가 없습니다. 화가 루나에서 이미지를 생성해주세요.")
+    elif not has_audio:
+        st.warning("음성이 없습니다. 성우 아리에서 음성을 생성해주세요.")
+    else:
+        st.info(
+            f"✅ 이미지 {len(st.session_state.image_paths)}개 · "
+            f"음성 {len(st.session_state.audio_paths)}개 준비 완료"
         )
 
-        progress_bar.progress(100)
-        status_text.success("✅ 영상 생성 완료!")
+        if st.button("🎬 영상 합성", key="run_video", type="primary"):
+            ensure_output_dirs()
+            with st.spinner("편집장 맥스가 영상을 조립하고 있습니다..."):
+                try:
+                    agent = VideoAgent()
+                    assets = GeneratedAssets(
+                        script=st.session_state.script,
+                        image_paths=st.session_state.image_paths,
+                        audio_paths=st.session_state.audio_paths,
+                    )
+                    out = agent.synthesize(assets)
+                    st.session_state.video_path = str(out)
+                    st.success("영상 완성!")
+                except Exception as e:
+                    st.error(f"영상 합성 오류: {e}")
 
-        # ── 시나리오 미리보기 ─────────────────────────────────────────────
-        with st.expander("📋 생성된 시나리오", expanded=False):
-            st.subheader(assets.script.title)
-            st.caption(f"총 길이: {assets.script.total_duration:.0f}초")
-            for scene in assets.script.scenes:
-                st.markdown(f"**장면 {scene.scene_number}** — {scene.duration}초")
-                st.write(scene.narration)
-                st.caption(f"이미지 프롬프트: {scene.image_prompt}")
-                st.divider()
-
-        # ── 생성된 이미지 그리드 ──────────────────────────────────────────
-        with st.expander("🖼️ 생성된 이미지", expanded=False):
-            cols = st.columns(min(num_scenes, 5))
-            for i, img_path in enumerate(assets.image_paths):
-                with cols[i % 5]:
-                    st.image(img_path, caption=f"장면 {i + 1}", use_container_width=True)
-
-        # ── 최종 영상 ─────────────────────────────────────────────────────
+    if st.session_state.video_path and Path(st.session_state.video_path).exists():
+        st.divider()
         st.subheader("🎥 완성된 영상")
-        st.video(assets.video_path)
-
-        with open(assets.video_path, "rb") as f:
+        st.video(st.session_state.video_path)
+        with open(st.session_state.video_path, "rb") as f:
             st.download_button(
-                label="⬇️ 영상 다운로드 (MP4)",
+                "⬇️ MP4 다운로드",
                 data=f,
-                file_name=Path(assets.video_path).name,
+                file_name=Path(st.session_state.video_path).name,
                 mime="video/mp4",
                 use_container_width=True,
             )
 
-    except Exception as e:
-        status_text.error(f"오류 발생: {e}")
-        st.exception(e)
+# ════════════════════════════════════════════════════════════════════════════
+# 전체 자동 생성
+# ════════════════════════════════════════════════════════════════════════════
+if run_all:
+    if not topic.strip():
+        st.warning("사이드바에서 영상 주제를 입력해주세요.")
+    else:
+        ensure_output_dirs()
+        prog = st.progress(0)
+        status = st.empty()
+
+        try:
+            status.info("✍️ 극작가 제이: 시나리오 작성 중...")
+            prog.progress(5)
+            st.session_state.script = ScenarioAgent().generate_script(topic, num_scenes, style)
+
+            image_agent = ImageAgent()
+            paths = []
+            for i, scene in enumerate(st.session_state.script.scenes):
+                status.info(f"🎨 화가 루나: 장면 {i+1}/{num_scenes} 그리는 중...")
+                prog.progress(10 + int(35 * i / num_scenes))
+                p = image_agent.generate_image(scene.image_prompt, scene.scene_number)
+                paths.append(str(p))
+            st.session_state.image_paths = paths
+
+            tts_agent = TTSAgent()
+            audio_paths = []
+            for i, scene in enumerate(st.session_state.script.scenes):
+                status.info(f"🎤 성우 아리: 장면 {i+1}/{num_scenes} 녹음 중...")
+                prog.progress(50 + int(25 * i / num_scenes))
+                p = tts_agent.synthesize(scene.narration, scene.scene_number)
+                audio_paths.append(str(p))
+            st.session_state.audio_paths = audio_paths
+
+            status.info("🎬 편집장 맥스: 영상 합성 중...")
+            prog.progress(80)
+            assets = GeneratedAssets(
+                script=st.session_state.script,
+                image_paths=st.session_state.image_paths,
+                audio_paths=st.session_state.audio_paths,
+            )
+            out = VideoAgent().synthesize(assets)
+            st.session_state.video_path = str(out)
+
+            prog.progress(100)
+            status.success("✅ 전체 완성! '편집장 맥스' 탭에서 영상을 확인하세요.")
+
+        except Exception as e:
+            show_quota_error(e)
