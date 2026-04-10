@@ -1,6 +1,6 @@
 """
-Selenium으로 Gemini 웹 UI를 자동화하여 시나리오 생성.
-저장된 Google 계정으로 자동 로그인합니다.
+Selenium으로 Gemini 웹 UI를 자동화.
+새 탭 방식 + 저장된 Google 계정으로 자동 로그인 + Pro 모드 선택.
 """
 import json
 import re
@@ -24,9 +24,8 @@ from app.core.models import ShortsScript, SceneScript
 from app.utils.credentials import load_credentials
 
 GEMINI_URL = "https://gemini.google.com/app"
-GOOGLE_LOGIN_URL = "https://accounts.google.com/signin"
+GOOGLE_SIGNIN_URL = "https://accounts.google.com/signin/v2/identifier"
 
-# 이 앱 전용 Chrome 프로필 (로그인 세션 저장)
 CHROME_PROFILE_DIR = str(Path.home() / ".ai_shorts_chrome")
 
 _PROMPT_TEMPLATE = """\
@@ -58,6 +57,7 @@ _INPUT_SELECTORS_CSS = [
     ".ql-editor[contenteditable='true']",
     "rich-textarea div[contenteditable='true']",
     "div[contenteditable='true'][data-placeholder]",
+    "p[data-placeholder]",
 ]
 _INPUT_SELECTORS_XPATH = [
     "//div[@contenteditable='true' and contains(@class,'ql-editor')]",
@@ -71,10 +71,28 @@ _RESPONSE_SELECTORS = [
     "message-content .markdown",
     "model-response",
 ]
+# Gemini 모델 선택기 셀렉터
+_MODEL_BTN_SELECTORS = [
+    "button[data-test-id='bard-mode-menu-button']",
+    "bard-mode-switcher button",
+    ".model-switcher button",
+    "button[aria-label*='Gemini']",
+    "button[aria-label*='모델']",
+    "model-switcher",
+    "mat-select",
+]
+# Pro 옵션 텍스트 패턴
+_PRO_OPTION_XPATHS = [
+    "//*[contains(text(),'2.5 Pro')]",
+    "//*[contains(text(),'Gemini 2.5 Pro')]",
+    "//*[contains(text(),'Pro')]",
+    "//mat-option[contains(.,'Pro')]",
+    "//li[contains(.,'Pro')]",
+]
 
 
-def _human_type(el, text: str, delay: float = 0.07):
-    """자동화 감지 우회를 위해 사람처럼 한 글자씩 입력"""
+def _human_type(el, text: str, delay: float = 0.08):
+    """자동화 감지 우회: 한 글자씩 입력"""
     for ch in text:
         el.send_keys(ch)
         time.sleep(delay + random.uniform(0, 0.05))
@@ -85,7 +103,7 @@ class BrowserScenarioAgent:
         self._status = status_fn or (lambda msg: None)
         self.driver = self._make_driver(headless)
 
-    # ── 드라이버 생성 ─────────────────────────────────────────────────────────
+    # ── 드라이버: 빈 페이지로 시작 ───────────────────────────────────────────
     def _make_driver(self, headless: bool) -> webdriver.Chrome:
         opts = Options()
         opts.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
@@ -96,126 +114,173 @@ class BrowserScenarioAgent:
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
         opts.add_argument("--start-maximized")
-        # 자동화 감지 추가 우회
-        opts.add_argument("--disable-extensions")
-        opts.add_argument("--no-first-run")
-        opts.add_argument("--disable-default-apps")
+        opts.add_argument("--disable-popup-blocking")
         if headless:
             opts.add_argument("--headless=new")
 
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=opts)
-
-        # navigator.webdriver 속성 제거
+        # webdriver 속성 숨기기
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"},
         )
         return driver
 
-    # ── 로그인 ───────────────────────────────────────────────────────────────
+    # ── 로그인 보장 ───────────────────────────────────────────────────────────
     def ensure_logged_in(self) -> bool:
-        """
-        Gemini 접속 → 로그인 여부 확인 → 필요 시 저장된 계정으로 자동 로그인.
-        반환값: 로그인 성공 여부
-        """
-        self._status("🌐 Gemini 접속 중...")
+        """새 탭에서 Gemini 접속 → 로그인 여부 확인 → 필요 시 자동 로그인"""
+        # 새 탭 열기 (기존 탭은 about:blank 상태)
+        self._status("🌐 새 탭에서 Gemini 접속 중...")
+        self.driver.execute_script("window.open('');")
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+
+        # Gemini로 이동
         self.driver.get(GEMINI_URL)
         time.sleep(4)
 
+        # 로그인 상태 확인
         if "accounts.google.com" not in self.driver.current_url:
             self._status("✅ 이미 로그인되어 있습니다.")
             return True
 
-        # 로그인 필요 → 저장된 자격증명 사용
+        # 로그인 필요
         email, password = load_credentials()
         if not email or not password:
             raise RuntimeError(
                 "로그인이 필요하지만 저장된 계정 정보가 없습니다.\n"
-                "사이드바에서 Google 계정 이메일과 비밀번호를 입력 후 저장하세요."
+                "사이드바에서 Google 계정 이메일과 비밀번호를 저장하세요."
             )
 
-        self._status("🔑 Google 계정으로 자동 로그인 중...")
+        self._status(f"🔑 '{email}' 계정으로 로그인 중...")
         return self._do_login(email, password)
 
     def _do_login(self, email: str, password: str) -> bool:
         driver = self.driver
 
         # ── 이메일 입력 ───────────────────────────────────────────────────
+        self._status("📧 이메일 입력 중...")
         try:
-            email_el = WebDriverWait(driver, 15).until(
+            email_el = WebDriverWait(driver, 20).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='email']"))
             )
         except TimeoutException:
-            raise RuntimeError("Google 로그인 이메일 입력창을 찾지 못했습니다.")
+            raise RuntimeError(
+                "Google 로그인 이메일 입력창을 찾지 못했습니다.\n"
+                f"현재 URL: {driver.current_url}"
+            )
 
+        email_el.clear()
         email_el.click()
         time.sleep(0.3)
         _human_type(email_el, email)
         time.sleep(0.5)
 
-        # Next 클릭
-        self._click_next(driver)
-        time.sleep(2)
+        # Next 버튼 — Google 공식 ID 사용
+        self._click_google_next(driver, step="identifier")
+        time.sleep(3)
 
         # ── 비밀번호 입력 ─────────────────────────────────────────────────
+        self._status("🔒 비밀번호 입력 중...")
         try:
-            pw_el = WebDriverWait(driver, 15).until(
+            pw_el = WebDriverWait(driver, 20).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='password']"))
             )
         except TimeoutException:
             raise RuntimeError(
                 "비밀번호 입력창을 찾지 못했습니다.\n"
-                "2단계 인증(2FA)이 설정된 경우 Chrome 창에서 직접 완료해주세요."
+                "Chrome 창에서 직접 진행해주세요."
             )
 
+        pw_el.clear()
         pw_el.click()
         time.sleep(0.3)
         _human_type(pw_el, password)
         time.sleep(0.5)
 
-        # Next 클릭
-        self._click_next(driver)
+        self._click_google_next(driver, step="password")
 
-        # ── 로그인 완료 대기 (최대 30초 — 2FA 등 대기) ───────────────────
-        self._status("⏳ 로그인 완료 대기 중... (2FA가 있다면 Chrome에서 완료해주세요)")
+        # ── 완료 대기 (2FA 포함 최대 60초) ───────────────────────────────
+        self._status("⏳ 로그인 완료 대기... (2FA가 있으면 Chrome에서 완료해주세요)")
         try:
-            WebDriverWait(driver, 30).until(
-                lambda d: "accounts.google.com" not in d.current_url
+            WebDriverWait(driver, 60).until(
+                lambda d: (
+                    "accounts.google.com" not in d.current_url
+                    and "signin" not in d.current_url
+                )
             )
         except TimeoutException:
             raise RuntimeError(
-                "로그인 시간 초과.\n"
-                "2FA가 설정된 경우 Chrome 창에서 인증을 완료해주세요.\n"
-                "완료 후 다시 시도하면 세션이 유지됩니다."
+                "로그인 시간 초과 (60초).\n"
+                "2FA가 있다면 Chrome 창에서 인증 후 다시 시도하세요.\n"
+                "한 번 로그인되면 이후엔 자동으로 처리됩니다."
             )
 
-        # ── Gemini로 리다이렉트 ───────────────────────────────────────────
+        # Gemini로 이동
         if "gemini.google.com" not in driver.current_url:
-            driver.get(GEMINI_URL)
+            self.driver.get(GEMINI_URL)
             time.sleep(4)
 
         self._status("✅ 로그인 성공!")
         return True
 
-    def _click_next(self, driver):
-        """Next / 다음 버튼 클릭"""
-        next_selectors = [
-            "button[jsname='LgbsSe']",   # 구글 로그인 Next
+    def _click_google_next(self, driver, step: str):
+        """Google 로그인 Next/다음 버튼 클릭"""
+        # Google의 실제 버튼 ID
+        btn_id = "identifierNext" if step == "identifier" else "passwordNext"
+        selectors = [
+            f"#{btn_id}",
+            f"#{btn_id} button",
+            f"#{btn_id} div[role='button']",
+            "button[jsname='LgbsSe']",
             "div[jsname='Njthtb']",
-            "#identifierNext",
-            "#passwordNext",
-            "button:has(span)",
+            "button:has(span.VfPpkd-vQzf8d)",
         ]
-        for sel in next_selectors:
+        for sel in selectors:
             try:
-                btn = driver.find_element(By.CSS_SELECTOR, sel)
+                btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                )
                 btn.click()
                 return
             except Exception:
                 continue
-        # fallback: Enter
+        # 최후 수단: Enter 키
         ActionChains(driver).send_keys(Keys.RETURN).perform()
+
+    # ── Pro 모드 선택 ─────────────────────────────────────────────────────────
+    def select_pro_mode(self) -> bool:
+        """Gemini 웹에서 2.5 Pro 모델 선택. 실패해도 계속 진행."""
+        self._status("⚙️ Pro 모드 선택 중...")
+        driver = self.driver
+
+        # 모델 선택 버튼 클릭
+        for sel in _MODEL_BTN_SELECTORS:
+            try:
+                btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, sel))
+                )
+                btn.click()
+                time.sleep(1.5)
+                break
+            except Exception:
+                continue
+
+        # Pro 옵션 클릭
+        for xpath in _PRO_OPTION_XPATHS:
+            try:
+                opt = WebDriverWait(driver, 4).until(
+                    EC.element_to_be_clickable((By.XPATH, xpath))
+                )
+                opt.click()
+                time.sleep(1)
+                self._status("✅ Pro 모드 선택 완료!")
+                return True
+            except Exception:
+                continue
+
+        self._status("⚠️ Pro 모드 선택 실패 (기본 모델로 계속 진행)")
+        return False
 
     # ── is_logged_in (로그인 설정 버튼용) ────────────────────────────────────
     def is_logged_in(self) -> bool:
@@ -231,6 +296,7 @@ class BrowserScenarioAgent:
         )
         try:
             self.ensure_logged_in()
+            self.select_pro_mode()
             raw = self._send_prompt(prompt)
             self._status("📄 응답 파싱 중...")
             return self._parse(raw, topic)
@@ -276,7 +342,7 @@ class BrowserScenarioAgent:
         ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL).perform()
         time.sleep(0.5)
 
-    # ── 전송 버튼 ────────────────────────────────────────────────────────────
+    # ── 전송 ─────────────────────────────────────────────────────────────────
     def _submit(self, input_el):
         send_selectors = [
             "button[aria-label='Send message']",
@@ -327,7 +393,6 @@ class BrowserScenarioAgent:
                 if curr and curr == prev:
                     break
                 prev = curr
-
         time.sleep(2)
 
     # ── 응답 텍스트 추출 ──────────────────────────────────────────────────────
@@ -350,12 +415,10 @@ class BrowserScenarioAgent:
     def _send_prompt(self, prompt: str) -> str:
         self._status("⌨️ 입력창 탐색 중...")
         input_el = self._find_input()
-
         self._status("📋 프롬프트 입력 중...")
         self._type_prompt(input_el, prompt)
         self._submit(input_el)
         self._wait_for_response()
-
         self._status("📥 응답 추출 중...")
         text = self._extract_latest_response()
         if not text:

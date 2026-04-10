@@ -77,6 +77,7 @@ def init_state():
         "audio_paths": [],
         "video_path": None,
         "browser_mode": False,
+        "style_ref_path": None,   # 스타일 참조 이미지 경로
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -337,10 +338,33 @@ with tab2:
             )
             img_mode = "browser" if "브라우저" in img_mode else "api"
 
+        # ── 스타일 참조 이미지 업로드 (브라우저 모드 전용) ──────────────
+        if img_mode == "browser":
+            st.markdown("**🖼️ 스타일 참조 이미지 (선택)**")
+            st.caption("업로드하면 Gemini에 첨부하여 이 스타일로 이미지를 생성합니다.")
+            uploaded = st.file_uploader(
+                "스타일 참조 이미지",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="style_ref_upload",
+                label_visibility="collapsed",
+            )
+            if uploaded:
+                import tempfile
+                tmp = tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=Path(uploaded.name).suffix,
+                )
+                tmp.write(uploaded.read())
+                tmp.flush()
+                st.session_state.style_ref_path = tmp.name
+                st.image(uploaded, caption="스타일 참조", width=200)
+            else:
+                st.session_state.style_ref_path = None
+
         st.divider()
 
         # ── 전체 생성 버튼 ───────────────────────────────────────────────
-        btn_label = "🌐 브라우저로 전체 이미지 생성" if img_mode == "browser" else "🎨 전체 이미지 생성 (API)"
+        btn_label = "🌐 브라우저로 전체 이미지 생성 (Gemini Pro)" if img_mode == "browser" else "🎨 전체 이미지 생성 (API)"
         if st.button(btn_label, key="run_images", type="primary"):
             ensure_output_dirs()
             status_area = st.empty()
@@ -355,7 +379,12 @@ with tab2:
                     agent = BrowserImageAgent(status_fn=_img_status)
                     prompts = [s.image_prompt for s in script.scenes]
                     scene_nums = [s.scene_number for s in script.scenes]
-                    result_paths = agent.generate_all_images(prompts, scene_nums, _img_status)
+                    style_ref = st.session_state.get("style_ref_path")
+                    result_paths = agent.generate_all_images(
+                        prompts, scene_nums,
+                        style_ref_path=style_ref,
+                        status_fn=_img_status,
+                    )
 
                     st.session_state.image_paths = [str(p) for p in result_paths]
                     st.session_state.video_path = None
@@ -427,7 +456,10 @@ with tab2:
                             try:
                                 if regen_mode == "browser":
                                     agent = BrowserImageAgent()
-                                    p = agent.generate_one(custom_prompt, scene.scene_number)
+                                    p = agent.generate_one(
+                                        custom_prompt, scene.scene_number,
+                                        style_ref_path=st.session_state.get("style_ref_path"),
+                                    )
                                 else:
                                     agent = ImageAgent()
                                     p = agent.generate_image(custom_prompt, scene.scene_number)
