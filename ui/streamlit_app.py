@@ -7,6 +7,7 @@ import streamlit as st
 from app.core.config import settings
 from app.core.models import ShortsScript, SceneScript
 from app.agents.scenario_agent import ScenarioAgent
+from app.agents.browser_agent import BrowserScenarioAgent
 from app.agents.image_agent import ImageAgent
 from app.agents.tts_agent import TTSAgent
 from app.agents.video_agent import VideoAgent
@@ -63,6 +64,7 @@ def init_state():
         "image_paths": [],
         "audio_paths": [],
         "video_path": None,
+        "browser_mode": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -88,6 +90,37 @@ with st.sidebar:
 
     st.divider()
 
+    # 시나리오 생성 모드 선택
+    st.markdown("**시나리오 생성 모드**")
+    browser_mode = st.toggle(
+        "🌐 브라우저 모드 (API 없이)",
+        value=st.session_state.browser_mode,
+        help="Chrome을 열어 Gemini 웹에 직접 입력합니다. API 할당량 없음.",
+    )
+    st.session_state.browser_mode = browser_mode
+
+    if browser_mode:
+        st.info("Chrome이 자동으로 열립니다.\n**로컬 실행 전용**")
+        if st.button("🔑 Chrome 로그인 설정", use_container_width=True,
+                     help="처음 사용 시 Google 로그인 창이 열립니다."):
+            with st.spinner("Chrome 열기..."):
+                try:
+                    agent = BrowserScenarioAgent(status_fn=lambda m: None)
+                    logged = agent.is_logged_in()
+                    if logged:
+                        agent.close()
+                        st.success("✅ 이미 로그인되어 있습니다!")
+                    else:
+                        st.warning(
+                            "Google 로그인이 필요합니다.\n"
+                            "열린 Chrome 창에서 로그인 후 창을 닫으세요.\n"
+                            "다음 실행부터 자동으로 로그인됩니다."
+                        )
+                except Exception as e:
+                    st.error(f"Chrome 실행 오류: {e}")
+
+    st.divider()
+
     # 전체 실행 버튼
     run_all = st.button("🚀 전체 자동 생성", type="primary", use_container_width=True)
 
@@ -95,9 +128,12 @@ with st.sidebar:
 
     # API 상태
     api_ok = bool(settings.GOOGLE_AI_API_KEY)
-    st.markdown(f"{'🟢' if api_ok else '🔴'} Google AI API")
-    if not api_ok:
-        st.error("API 키 없음\nApp settings → Secrets")
+    if browser_mode:
+        st.markdown("🌐 브라우저 모드 활성")
+    else:
+        st.markdown(f"{'🟢' if api_ok else '🔴'} Google AI API")
+        if not api_ok:
+            st.error("API 키 없음\nApp settings → Secrets")
 
     # 진행 상태 요약
     st.divider()
@@ -152,20 +188,38 @@ tab1, tab2, tab3, tab4 = st.tabs(
 with tab1:
     persona_header("scenario")
 
-    if st.button("✍️ 시나리오 생성", key="run_scenario", type="primary"):
+    mode_label = "🌐 브라우저로 시나리오 생성" if st.session_state.browser_mode else "✍️ 시나리오 생성"
+    if st.session_state.browser_mode:
+        st.info("Chrome이 자동으로 열려 Gemini에 프롬프트를 입력합니다.")
+
+    if st.button(mode_label, key="run_scenario", type="primary"):
         if not topic.strip():
             st.warning("사이드바에서 영상 주제를 입력해주세요.")
         else:
             ensure_output_dirs()
-            with st.spinner("극작가 제이가 대본을 쓰고 있습니다..."):
-                try:
+            status_box = st.empty()
+            try:
+                if st.session_state.browser_mode:
+                    def _status(msg):
+                        status_box.info(msg)
+
+                    agent = BrowserScenarioAgent(status_fn=_status)
+                    _status("🌐 Chrome 실행 중... (Gemini에 로그인되어 있어야 합니다)")
+                    st.session_state.script = agent.generate_script(topic, num_scenes, style)
+                else:
+                    status_box.info("극작가 제이가 대본을 쓰고 있습니다...")
                     agent = ScenarioAgent()
                     st.session_state.script = agent.generate_script(topic, num_scenes, style)
-                    st.session_state.image_paths = []
-                    st.session_state.audio_paths = []
-                    st.session_state.video_path = None
-                    st.success("시나리오 완성!")
-                except Exception as e:
+
+                st.session_state.image_paths = []
+                st.session_state.audio_paths = []
+                st.session_state.video_path = None
+                status_box.success("시나리오 완성!")
+            except Exception as e:
+                if st.session_state.browser_mode:
+                    status_box.error(f"브라우저 오류: {e}")
+                else:
+                    status_box.empty()
                     show_quota_error(e)
 
     # 시나리오 표시 & 편집
