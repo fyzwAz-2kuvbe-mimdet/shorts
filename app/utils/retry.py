@@ -4,12 +4,7 @@ from typing import TypeVar, Callable, Any
 
 T = TypeVar("T")
 
-# 429 발생 시 시도할 모델 폴백 순서
-GEMINI_TEXT_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-]
+GEMINI_TEXT_MODELS = ["gemini-2.5-flash"]
 
 
 def is_quota_error(e: Exception) -> bool:
